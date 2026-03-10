@@ -36,6 +36,10 @@ jobs:
               });
             }
 
+            function isBugReport(issue) {
+              return issue.labels.some(l => l.name === 'bug');
+            }
+
             if (context.eventName === 'workflow_dispatch') {
               const issues = await github.paginate(github.rest.issues.list, {
                 owner,
@@ -46,11 +50,12 @@ jobs:
               for (const issue of issues) {
                 if (issue.pull_request) continue;
                 if (contributorRoles.includes(issue.author_association)) continue;
+                if (isBugReport(issue)) continue;
                 await closeTaskIssue(issue.number);
               }
             } else {
-              const { author_association } = context.payload.issue;
-              if (!contributorRoles.includes(author_association)) {
-                await closeTaskIssue(context.payload.issue.number);
+              const issue = context.payload.issue;
+              if (!contributorRoles.includes(issue.author_association) && !isBugReport(issue)) {
+                await closeTaskIssue(issue.number);
               }
             }
