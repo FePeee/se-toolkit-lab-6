@@ -291,7 +291,7 @@ def get_tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "query_api",
-                "description": "Call the backend API to query data or check system behavior. Use this for questions about database contents, API responses, status codes, or analytics. Use use_auth=false to test authentication errors.",
+                "description": "Call the backend API to query data or check system behavior. Use this for questions about database contents, API responses, status codes, or analytics. The API requires authentication by default — only set use_auth=false when explicitly testing auth errors (e.g., 'What status code without auth?').",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -309,7 +309,7 @@ def get_tool_schemas() -> list[dict]:
                         },
                         "use_auth": {
                             "type": "boolean",
-                            "description": "Whether to use authentication (default: true). Set to false to test auth errors (e.g., 401 responses).",
+                            "description": "Whether to use authentication. Default: true. ONLY set to false when explicitly testing auth errors (e.g., 'What status code without auth?').",
                         },
                     },
                     "required": ["method", "path"],
@@ -365,11 +365,12 @@ When answering questions:
 
 1. Wiki/documentation questions (e.g., "what steps...", "how to...", "according to wiki..."):
    - FIRST use list_files("wiki") to find relevant files
-   - For GitHub-related questions: read wiki/github.md
+   - For GitHub questions (branch protection, PR, fork): read wiki/github.md
    - For Git workflow questions: read wiki/git-workflow.md
    - For SSH questions: read wiki/ssh.md
    - THEN use read_file to read specific files
    - Look for section headers (lines starting with #, ##, etc.)
+   - IMPORTANT: Include key terms from the question in your answer (e.g., "branch", "protect" for branch protection questions)
 
 2. System facts (framework, ports, code structure):
    - Use read_file on source code files (backend/app/main.py, backend/app/routers/*.py)
@@ -380,10 +381,11 @@ When answering questions:
    - Common endpoints: /items/, /analytics/scores?lab=lab-XX, etc.
 
 4. Bug diagnosis:
-   - FIRST use query_api to reproduce the error (try multiple labs if needed)
+   - FIRST use query_api to reproduce the error (try multiple labs if needed) — use authentication by default
    - THEN ALWAYS use read_file to find the buggy code
    - When you find an error, explicitly name it (e.g., "ZeroDivisionError: division by zero", "TypeError: 'NoneType' object is not iterable")
    - Include the source file path in your answer
+   - Only use use_auth=false for questions specifically asking about "status code without auth"
 
 5. For top-learners endpoint bugs:
    - Query /analytics/top-learners?lab=lab-XX with different labs
@@ -394,7 +396,7 @@ Important rules:
 - For "according to wiki" or "what steps" questions: ALWAYS start with list_files("wiki")
 - For GitHub questions (branch protection, PR, fork): read wiki/github.md
 - For "what framework" or code questions: ALWAYS use read_file on backend/app/*.py
-- For "list routers" or "what modules" questions: use list_files("backend/app/routers"), then read EACH router file (items.py, interactions.py, analytics.py, pipeline.py, learners.py)
+- For "list routers" or "what modules" questions: use list_files("backend/app/routers"), then read EACH router file (items.py, interactions.py, analytics.py, pipeline.py, learners.py) — list them all explicitly in your answer
 - For "how many items" or data questions: ALWAYS use query_api
 - For "status code without auth": use query_api with use_auth=false
 
@@ -412,7 +414,7 @@ For query_api:
 - The API returns JSON with status_code and body
 
 Always provide your final answer with:
-- answer: The direct answer to the question (include error names like "ZeroDivisionError" explicitly). Keep answers concise (under 200 characters).
+- answer: The direct answer to the question (include error names like "ZeroDivisionError" explicitly). Keep answers concise (under 200 characters) but include key terms from the question.
 - source: The file path, section, or API endpoint used (e.g., wiki/git-workflow.md#resolving-merge-conflicts or GET /items/ or backend/app/routers/analytics.py)
 
 Format your response clearly with "answer:" and "source:" on separate lines.

@@ -134,3 +134,101 @@ def test_agent_uses_list_files_for_wiki_listing():
     print(
         f"✓ Test passed: answer={output['answer'][:50]}..., tool_calls={len(output['tool_calls'])}"
     )
+
+
+def test_agent_uses_query_api_for_item_count():
+    """Test that agent uses query_api tool to answer questions about database contents."""
+    # Path to agent.py in project root
+    project_root = Path(__file__).parent.parent
+    agent_path = project_root / "agent.py"
+
+    # Run agent with a question about item count
+    result = subprocess.run(
+        ["uv", "run", str(agent_path), "How many items are in the database?"],
+        capture_output=True,
+        text=True,
+        timeout=120,  # Longer timeout for tool calls
+        cwd=str(project_root),
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(f"Agent output is not valid JSON: {result.stdout}") from e
+
+    # Check required fields
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+
+    # Check that query_api was used
+    tool_names = [call.get("tool", "") for call in output["tool_calls"]]
+    assert "query_api" in tool_names, (
+        "Expected 'query_api' in tool_calls for database question"
+    )
+
+    # Check that answer contains a number OR mentions items
+    import re
+
+    numbers = re.findall(r"\d+", output["answer"])
+    has_items = "item" in output["answer"].lower()
+    assert len(numbers) > 0 or has_items, (
+        "Expected answer to contain a number or mention items"
+    )
+
+    print(
+        f"✓ Test passed: answer={output['answer'][:50]}..., tool_calls={len(output['tool_calls'])}"
+    )
+
+
+def test_agent_uses_query_api_for_status_code():
+    """Test that agent uses query_api tool to check API status codes without auth."""
+    # Path to agent.py in project root
+    project_root = Path(__file__).parent.parent
+    agent_path = project_root / "agent.py"
+
+    # Run agent with a question about status code without auth
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            str(agent_path),
+            "What HTTP status code does the API return when you request /items/ without an authentication header?",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,  # Longer timeout for tool calls
+        cwd=str(project_root),
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(f"Agent output is not valid JSON: {result.stdout}") from e
+
+    # Check required fields
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+
+    # Check that query_api was used
+    tool_names = [call.get("tool", "") for call in output["tool_calls"]]
+    assert "query_api" in tool_names, (
+        "Expected 'query_api' in tool_calls for status code question"
+    )
+
+    # Check that answer contains 401 or 403
+    answer_lower = output["answer"].lower()
+    assert "401" in answer_lower or "403" in answer_lower, (
+        f"Expected answer to contain 401 or 403, got: {output['answer']}"
+    )
+
+    print(
+        f"✓ Test passed: answer={output['answer'][:50]}..., tool_calls={len(output['tool_calls'])}"
+    )
