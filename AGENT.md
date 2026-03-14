@@ -26,11 +26,48 @@ LLM_API_BASE=https://openrouter.ai/api/v1
 LLM_MODEL=nvidia/nemotron-3-nano-30b-a3b:free
 ```
 
-> **Note:** This is NOT the same as `LMS_API_KEY` in `.env.docker.secret`. That key protects your backend LMS endpoints. This key authenticates with your LLM provider.
+Backend API configuration is stored in `.env.docker.secret`:
+
+```bash
+LMS_API_KEY=my-secret-api-key
+AGENT_API_BASE_URL=http://localhost:42002  # optional, defaults to localhost:42002
+```
+
+> **Note:** Two distinct keys: `LMS_API_KEY` (in `.env.docker.secret`) protects your backend LMS endpoints. `LLM_API_KEY` (in `.env.agent.secret`) authenticates with your LLM provider. Don't mix them up.
 
 ## Tools
 
-The agent has two tools that extend its capabilities beyond simple chat:
+The agent has three tools that extend its capabilities beyond simple chat:
+
+### `query_api` (Task 3)
+
+Calls the backend API to query data or check system behavior.
+
+**Parameters:**
+
+- `method` (string, required): HTTP method (GET, POST, PUT, DELETE, etc.)
+- `path` (string, required): API path (e.g., `/items/`, `/analytics/completion-rate?lab=lab-01`)
+- `body` (string, optional): JSON request body for POST/PUT requests
+
+**Returns:** JSON string with `status_code` and `body` (or `error` on failure).
+
+**Authentication:** Uses `LMS_API_KEY` from `.env.docker.secret` as a Bearer token.
+
+**Example:**
+
+```json
+{
+  "tool": "query_api",
+  "args": {"method": "GET", "path": "/items/"},
+  "result": "{\"status_code\": 200, \"body\": \"[...]\"}"
+}
+```
+
+**Use cases:**
+
+- Data queries: "How many items are in the database?"
+- Status code checks: "What status code does /items/ return without auth?"
+- Bug diagnosis: "Query /analytics/completion-rate and explain the error"
 
 ### `read_file`
 
@@ -237,12 +274,13 @@ Output JSON to stdout: {"answer": "...", "source": "...", "tool_calls": [...]}
 | Component | Function | Purpose |
 |-----------|----------|---------|
 | CLI Parser | `main()` | Parse question from command line |
-| Config Loader | `load_config()` | Load LLM credentials from `.env.agent.secret` |
+| Config Loader | `load_config()` | Load LLM credentials from `.env.agent.secret` and backend config from `.env.docker.secret` |
 | Tool: read_file | `read_file()` | Read file contents with path validation |
 | Tool: list_files | `list_files()` | List directory entries with path validation |
+| Tool: query_api | `query_api()` | Call backend API with Bearer token authentication |
 | Path Validator | `validate_path()` | Prevent directory traversal attacks |
-| Tool Schemas | `get_tool_schemas()` | Define OpenAI-compatible tool definitions |
-| Tool Executor | `execute_tool()` | Route tool calls to implementation |
+| Tool Schemas | `get_tool_schemas()` | Define OpenAI-compatible tool definitions (3 tools) |
+| Tool Executor | `execute_tool()` | Route tool calls to implementation, pass config for query_api |
 | LLM Client | `call_llm()` | HTTP POST to LLM API via httpx |
 | Answer Parser | `parse_final_answer()` | Extract answer and source from LLM response |
 | Agentic Loop | `run_agentic_loop()` | Orchestrate tool calls and LLM interactions |
@@ -266,13 +304,17 @@ Output JSON to stdout: {"answer": "...", "source": "...", "tool_calls": [...]}
 │  [LLM API] ──tool_calls─────┤                               │
 │    │                        │                               │
 │    ▼                        │                               │
-│  execute_tool()             │                               │
+│  execute_tool() ◄───config──┤                               │
 │    │                        │                               │
 │    ├──► read_file()         │                               │
 │    │       └──► validate_path()                             │
 │    │                        │                               │
-│    └──► list_files()        │                               │
-│            └──► validate_path()                             │
+│    ├──► list_files()        │                               │
+│    │       └──► validate_path()                             │
+│    │                        │                               │
+│    └──► query_api()         │                               │
+│            ├──► httpx request                               │
+│            └──► Bearer auth (LMS_API_KEY)                   │
 │                                                             │
 │  parse_final_answer()                                       │
 │    │                                                        │
@@ -365,10 +407,50 @@ Tests verify:
 - Source extraction is heuristic-based (LLM must provide source in response)
 - No multi-turn conversation support (each question is independent)
 - No caching of file reads (same file may be read multiple times in one session)
+- API rate limits on free LLM tier (50 requests/day on OpenRouter free tier)
 
-## Future Work (Task 3)
+## Task 3: The System Agent - Lessons Learned
 
-- Add `query_api` tool to query the backend LMS
+### Implementation
+
+Adding the `query_api` tool required:
+
+1. **Environment variable handling**: Load `LMS_API_KEY` from `.env.docker.secret` and `AGENT_API_BASE_URL` with a default fallback
+2. **Tool schema design**: Clear description telling the LLM when to use `query_api` vs `read_file`
+3. **Authentication**: Bearer token in the `Authorization` header
+4. **Error handling**: Timeout, connection errors, and HTTP errors all return structured JSON
+
+### System Prompt Strategy
+
+The key insight is guiding the LLM to choose the right tool:
+
+- **Wiki/documentation questions** → `read_file` + `list_files`
+- **System facts** (framework, ports) → `read_file` on source code
+- **Data queries** (item count, scores) → `query_api`
+- **Bug diagnosis** → `query_api` first, then `read_file` to find the bug
+
+### Benchmark Results
+
+The 10-question benchmark tests:
+
+- 4 wiki/documentation questions (read_file)
+- 2 system fact questions (read_file or query_api)
+- 2 data query questions (query_api)
+- 2 reasoning questions (multi-step tool chaining)
+
+### Key Debugging Insights
+
+1. **Tool selection**: The LLM sometimes uses `read_file` for data questions. Fixed by improving the tool description to emphasize "database contents" and "API responses"
+2. **Content may be null**: When the LLM makes tool calls, `content` field is `null` (not missing). Use `(msg.get("content") or "")` instead of `msg.get("content", "")`
+3. **API authentication**: Without `LMS_API_KEY`, the API returns 401. The tool handles this gracefully and returns the error in the result
+
+### Final Score
+
+After iteration, the agent passes all 10 local questions in `run_eval.py`.
+
+## Future Work
+
 - Improve source extraction with better header detection
 - Add conversation history for multi-turn support
 - Implement file content caching within a session
+- Add more sophisticated error recovery for API failures

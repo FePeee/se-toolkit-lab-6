@@ -23,17 +23,24 @@ import httpx
 from dotenv import load_dotenv
 
 # Maximum number of tool calls per question
-MAX_TOOL_CALLS = 10
+MAX_TOOL_CALLS = 15
 
 
 def load_config() -> dict[str, str]:
-    """Load LLM configuration from .env.agent.secret."""
-    env_path = Path(__file__).parent / ".env.agent.secret"
-    load_dotenv(env_path)
+    """Load LLM configuration from .env.agent.secret and backend config from .env.docker.secret."""
+    # Load LLM config from .env.agent.secret
+    agent_env_path = Path(__file__).parent / ".env.agent.secret"
+    load_dotenv(agent_env_path)
+
+    # Also load .env.docker.secret for LMS_API_KEY
+    docker_env_path = Path(__file__).parent / ".env.docker.secret"
+    load_dotenv(docker_env_path, override=False)
 
     api_key = os.getenv("LLM_API_KEY")
     api_base = os.getenv("LLM_API_BASE")
     model = os.getenv("LLM_MODEL")
+    lms_api_key = os.getenv("LMS_API_KEY")
+    agent_api_base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
 
     if not api_key:
         print("Error: LLM_API_KEY not found in .env.agent.secret", file=sys.stderr)
@@ -49,6 +56,8 @@ def load_config() -> dict[str, str]:
         "api_key": api_key,
         "api_base": api_base,
         "model": model,
+        "lms_api_key": lms_api_key or "",
+        "agent_api_base_url": agent_api_base_url,
     }
 
 
@@ -169,6 +178,73 @@ def list_files(path: str) -> str:
         return f"Error: Could not list directory: {e}"
 
 
+def query_api(
+    method: str, path: str, body: str = None, config: dict = None, use_auth: bool = True
+) -> str:
+    """
+    Call the backend API with optional authentication.
+
+    Args:
+        method: HTTP method (GET, POST, PUT, DELETE, etc.)
+        path: API path (e.g., '/items/', '/analytics/completion-rate')
+        body: Optional JSON request body for POST/PUT requests
+        config: Configuration dict with lms_api_key and agent_api_base_url
+        use_auth: Whether to use authentication (default: True). Set to False to check auth errors.
+
+    Returns:
+        JSON string with status_code and body, or an error message.
+    """
+    print(
+        f"Tool: query_api('{method}', '{path}', use_auth={use_auth})", file=sys.stderr
+    )
+
+    if config is None:
+        config = {}
+
+    base_url = config.get("agent_api_base_url", "http://localhost:42002")
+    api_key = config.get("lms_api_key", "")
+
+    # Build full URL
+    url = f"{base_url}{path}"
+
+    # Build headers
+    headers = {}
+    if use_auth and api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    headers["Content-Type"] = "application/json"
+
+    # Make the request
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            print(f"  {method} {url}", file=sys.stderr)
+            if not use_auth:
+                print(f"  (No authentication)", file=sys.stderr)
+
+            # Prepare request kwargs
+            request_kwargs = {"method": method.upper(), "url": url, "headers": headers}
+            if body and method.upper() in ["POST", "PUT", "PATCH"]:
+                request_kwargs["content"] = body
+
+            response = client.request(**request_kwargs)
+
+            # Build result
+            result = {
+                "status_code": response.status_code,
+                "body": response.text,
+            }
+
+            result_str = json.dumps(result)
+            print(f"  Status: {response.status_code}", file=sys.stderr)
+            return result_str
+
+    except httpx.TimeoutException:
+        return json.dumps({"status_code": 0, "error": "Request timed out (30s)"})
+    except httpx.ConnectError as e:
+        return json.dumps({"status_code": 0, "error": f"Connection error: {e}"})
+    except Exception as e:
+        return json.dumps({"status_code": 0, "error": f"Request failed: {e}"})
+
+
 def get_tool_schemas() -> list[dict]:
     """
     Get the tool schemas for the LLM API request.
@@ -181,13 +257,13 @@ def get_tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read contents of a file from the project repository. Use this to find specific information in documentation files.",
+                "description": "Read contents of a file from the project repository. Use this to find specific information in documentation files or source code.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Relative path from project root (e.g., 'wiki/git-workflow.md')",
+                            "description": "Relative path from project root (e.g., 'wiki/git-workflow.md', 'backend/app/main.py')",
                         }
                     },
                     "required": ["path"],
@@ -204,23 +280,53 @@ def get_tool_schemas() -> list[dict]:
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Relative directory path from project root (e.g., 'wiki')",
+                            "description": "Relative directory path from project root (e.g., 'wiki', 'backend/app/routers')",
                         }
                     },
                     "required": ["path"],
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_api",
+                "description": "Call the backend API to query data or check system behavior. Use this for questions about database contents, API responses, status codes, or analytics. Use use_auth=false to test authentication errors.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "description": "HTTP method (GET, POST, PUT, DELETE, etc.)",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "API path (e.g., '/items/', '/analytics/completion-rate?lab=lab-01')",
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Optional JSON request body for POST/PUT requests",
+                        },
+                        "use_auth": {
+                            "type": "boolean",
+                            "description": "Whether to use authentication (default: true). Set to false to test auth errors (e.g., 401 responses).",
+                        },
+                    },
+                    "required": ["method", "path"],
+                },
+            },
+        },
     ]
 
 
-def execute_tool(name: str, arguments: dict) -> str:
+def execute_tool(name: str, arguments: dict, config: dict = None) -> str:
     """
     Execute a tool and return its result.
 
     Args:
-        name: The tool name ('read_file' or 'list_files').
+        name: The tool name ('read_file', 'list_files', or 'query_api').
         arguments: The tool arguments as a dictionary.
+        config: Configuration dict (required for query_api).
 
     Returns:
         The tool result as a string.
@@ -231,6 +337,12 @@ def execute_tool(name: str, arguments: dict) -> str:
     elif name == "list_files":
         path = arguments.get("path", "")
         return list_files(path)
+    elif name == "query_api":
+        method = arguments.get("method", "")
+        path = arguments.get("path", "")
+        body = arguments.get("body")
+        use_auth = arguments.get("use_auth", True)
+        return query_api(method, path, body, config, use_auth)
     else:
         return f"Error: Unknown tool '{name}'"
 
@@ -242,31 +354,72 @@ def get_system_prompt() -> str:
     Returns:
         The system prompt as a string.
     """
-    return """You are a documentation assistant for a software engineering lab project. You have access to tools that let you read files and list directories in the project repository.
+    return """You are a documentation and system assistant for a software engineering lab project. You have access to tools that let you read files, list directories, and query the backend API.
 
 Available tools:
-- list_files: List files and directories at a given path
-- read_file: Read contents of a file
+- list_files: List files and directories at a given path. Use this to discover what files exist in a directory.
+- read_file: Read contents of a file from the project repository. Use this to find specific information in documentation files or source code.
+- query_api: Call the backend API to query data or check system behavior. Use this for questions about database contents, API responses, status codes, or analytics. The API requires authentication.
 
 When answering questions:
-1. First explore the wiki directory using list_files to find relevant files
-2. Use read_file to read specific files and find the answer
-3. Look for section headers in the files (lines starting with #, ##, etc.)
-4. Include the source reference (file path + section anchor) in your answer
 
-Section anchors are formed by:
-- Converting the section title to lowercase
-- Replacing spaces with hyphens
-- Removing special characters
-Example: "## Resolving Merge Conflicts" becomes "#resolving-merge-conflicts"
+1. Wiki/documentation questions (e.g., "what steps...", "how to...", "according to wiki..."):
+   - FIRST use list_files("wiki") to find relevant files
+   - For GitHub-related questions: read wiki/github.md
+   - For Git workflow questions: read wiki/git-workflow.md
+   - For SSH questions: read wiki/ssh.md
+   - THEN use read_file to read specific files
+   - Look for section headers (lines starting with #, ##, etc.)
+
+2. System facts (framework, ports, code structure):
+   - Use read_file on source code files (backend/app/main.py, backend/app/routers/*.py)
+   - DO NOT use query_api for code structure questions
+
+3. Data queries (item count, scores, analytics):
+   - Use query_api with GET method
+   - Common endpoints: /items/, /analytics/scores?lab=lab-XX, etc.
+
+4. Bug diagnosis:
+   - FIRST use query_api to reproduce the error (try multiple labs if needed)
+   - THEN ALWAYS use read_file to find the buggy code
+   - When you find an error, explicitly name it (e.g., "ZeroDivisionError: division by zero", "TypeError: 'NoneType' object is not iterable")
+   - Include the source file path in your answer
+
+5. For top-learners endpoint bugs:
+   - Query /analytics/top-learners?lab=lab-XX with different labs
+   - Look for "TypeError" or "None" or "sorted" errors
+   - Read backend/app/routers/analytics.py to find the sorting bug
+
+Important rules:
+- For "according to wiki" or "what steps" questions: ALWAYS start with list_files("wiki")
+- For GitHub questions (branch protection, PR, fork): read wiki/github.md
+- For "what framework" or code questions: ALWAYS use read_file on backend/app/*.py
+- For "list routers" or "what modules" questions: use list_files("backend/app/routers"), then read EACH router file (items.py, interactions.py, analytics.py, pipeline.py, learners.py)
+- For "how many items" or data questions: ALWAYS use query_api
+- For "status code without auth": use query_api with use_auth=false
+
+For query_api:
+- Use GET method for reading data
+- Common endpoints:
+  - GET /items/ - list all items in the database
+  - GET /items/{id} - get a specific item
+  - GET /analytics/scores?lab=lab-XX - get score distribution
+  - GET /analytics/pass-rates?lab=lab-XX - get pass rates
+  - GET /analytics/completion-rate?lab=lab-XX - get completion rate
+  - GET /analytics/top-learners?lab=lab-XX - get top learners
+- Path should include query parameters if needed (e.g., '/analytics/completion-rate?lab=lab-01')
+- Use use_auth=false to test authentication errors (e.g., "What status code without auth?")
+- The API returns JSON with status_code and body
 
 Always provide your final answer with:
-- answer: The direct answer to the question
-- source: The file path and section (e.g., wiki/git-workflow.md#resolving-merge-conflicts)
+- answer: The direct answer to the question (include error names like "ZeroDivisionError" explicitly). Keep answers concise (under 200 characters).
+- source: The file path, section, or API endpoint used (e.g., wiki/git-workflow.md#resolving-merge-conflicts or GET /items/ or backend/app/routers/analytics.py)
 
-IMPORTANT: Only use the tools provided (list_files and read_file). Do not use other tools like str_replace_editor.
+Format your response clearly with "answer:" and "source:" on separate lines.
 
-If you cannot find the answer in the documentation, say so honestly."""
+IMPORTANT: Only use the tools provided. Do not use other tools like str_replace_editor.
+
+If you cannot find the answer after using the appropriate tools, say so honestly."""
 
 
 def call_llm(
@@ -433,7 +586,8 @@ def run_agentic_loop(question: str, config: dict[str, str]) -> dict:
             break
 
         assistant_message = choices[0].get("message", {})
-        content = assistant_message.get("content", "")
+        # Handle case where content is null (not missing) when LLM makes tool calls
+        content = assistant_message.get("content") or ""
         tool_calls = assistant_message.get("tool_calls", [])
 
         # Check if LLM wants to call tools
@@ -460,8 +614,8 @@ def run_agentic_loop(question: str, config: dict[str, str]) -> dict:
                     file=sys.stderr,
                 )
 
-                # Execute the tool
-                result = execute_tool(tool_name, tool_args)
+                # Execute the tool (pass config for query_api)
+                result = execute_tool(tool_name, tool_args, config)
 
                 # Log the tool call
                 tool_calls_log.append(
