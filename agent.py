@@ -690,6 +690,5 @@ def main() -> None:
     sys.stdout.buffer.write((json_output + "\n").encode("utf-8"))
     sys.stdout.flush()
 
-
 if __name__ == "__main__":
     main()
